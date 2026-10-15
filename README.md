@@ -1,33 +1,30 @@
 # warp-relay-pool
 
-Self-hosted Docker/WARP alternative to the Workers/Deno/Vercel relays
-[pi-freeflow](https://github.com/trefeon/pi-freeflow)'s `/freeflow deploy` creates:
-N isolated relays, each with its own WARP egress
-address and its own stable client URL. A keep-cold prober rotates only the
-WARP clients behind throttled relays, so client pool URLs never change.
+Self-hosted Docker/MicroWARP egress relay pool for AI coding agents ([pi-freeflow](https://github.com/trefeon/pi-freeflow), OMP, Pi).
+
+Provides N isolated Cloudflare WARP egress addresses paired with public HTTPS URLs via **Cloudflare Quick Tunnels (TryCloudflare)** or private static URLs via **Tailscale Mesh-VPN**. A background keep-cold prober automatically detects upstream HTTP 429 rate limits and rotates throttled WARP clients without changing your client URLs.
 
 ```
-[OMP/Pi via pi-freeflow] ──► http://<tailscale-ip>:310N (mesh-VPN, recommended)
-                          └─► <RELAY-N-URL> (Quick Tunnel, fallback)
-      ──► [relay :300N] ──► [warp-N SOCKS :1080] ──► [upstream API, egress <EGRESS-IP>]
+[OMP / Pi via pi-freeflow]
+          │
+          ├── TryCloudflare (Public HTTPS, zero client VPN) ──► https://<hash>.trycloudflare.com
+          └── Tailscale (Private Mesh-VPN direct)           ──► http://<tailscale-ip>:310N
+                    │
+                    ▼
+          [relay router :300N (10.244.0.100)]
+                    │  (per-port SOCKS5 forward)
+                    ▼
+          [MicroWARP SOCKS :1080 (Docker bridge 10.244.0.0/16)]
+                    │  (Alpine WireGuard + microsocks, ~1.8 MiB RAM/node)
+                    ▼
+          [Cloudflare Edge ──► Upstream API (opencode.ai / api.kilo.ai)]
 ```
 
-One `warp-N` per relay (own identity, own throttle budget), one `relay`
-process (allowlist-gated proxy on `300N`, SSE streaming, health check
-without target header via its own WARP dispatcher). Quick-Tunnel
-`cloudflared` containers (`tunnel-N → http://10.244.0.100:300N`) are
-optional, for hosts without VPN (`--with-tunnels`).
-Bridge `10.244.0.0/16`, relay app fixed at `10.244.0.100` — see
-`docker-compose.yml` / `generate-compose.sh`.
+---
 
-> Client requirement: mesh-VPN `http://` relay URLs need a pi-freeflow
-> build with mesh-VPN peer relay support (plain-http URLs on private
-> tailnet/host addresses are rejected by older https-only builds).
-> Without that, use the Quick-Tunnel path below.
+## Quickstart: One-Command Auto Setup
 
-## One-Command Auto Setup (Recommended)
-
-Run the setup wizard on your Linux VPS:
+Deploy on any Linux VPS (Ubuntu, Debian, Alpine, Fedora, CentOS):
 
 ```bash
 git clone https://github.com/trefeon/warp-relay-pool.git
@@ -35,126 +32,123 @@ cd warp-relay-pool
 ./setup.sh
 ```
 
-Or run non-interactively with auto-detected recommendations:
+Or run non-interactively with auto-detected sizing recommendations:
 ```bash
 ./setup.sh -y
 ```
 
-The wizard automatically:
-- Inspects VPS memory, CPU cores, and Tailscale connectivity.
-- Recommends the safe relay count based on VPS capabilities.
-- Uses the minimal **MicroWARP** engine (`warp-lite`: ~1.8 MiB RAM/node vs ~100 MiB standard).
-- Generates `docker-compose.yml` and starts the containers.
-- Verifies WARP connectivity and displays your `/freeflow add` commands.
-- Installs the `warp-keep-cold.timer` systemd service.
+### What the Setup Wizard Does:
+1. **Prerequisite Check & Auto-Install:** Verifies and automatically installs Docker, Docker Compose, and Node.js if missing.
+2. **Hardware Sizing:** Detects VPS RAM and CPU cores, recommends safe relay limits, and defaults to the **5-relay sweet spot**.
+3. **MicroWARP Build:** Builds the ultra-lightweight WireGuard + microsocks engine (~1.8 MiB RAM per relay).
+4. **TryCloudflare Tunnel Wiring:** Automatically exposes each relay on a public HTTPS URL without requiring any Cloudflare account, domain name, or open inbound firewall ports.
+5. **Keep-Cold Service:** Installs and enables the `warp-keep-cold.timer` systemd service to automatically probe and rotate rate-limited egress IPs every 5 minutes.
+6. **Client Commands:** Prints ready-to-paste `/freeflow add` commands directly into your terminal.
 
 ---
 
-## Manual Quickstart (mesh-VPN direct)
+## Sizing: Why 5 Relays is the Sweet Spot
 
+For most users and developers running parallel coding subagents, **5 relays** is optimal:
+- **5 Independent Egress IPs:** Upstream rate limits (HTTP 429) are tracked per-IP per-model. 5 relays provide 5x throughput burst capacity.
+- **Ultra-Low Memory Consumption:**
+  - With **TryCloudflare Quick Tunnels**: ~140 MB total RAM (fits comfortably on any 512 MB or 1 GB VPS).
+  - With **Tailscale Mesh-VPN**: ~50 MB total RAM.
+- **Auto-Recovery:** If one relay hits a rate limit, the background controller rotates that single container's egress IP while the remaining 4 relays continue serving turns seamlessly.
+
+| VPS Plan | Ingress Mode | Recommended Relays | Total Stack Memory |
+|---|---|---|---|
+| **512 MB VPS** | TryCloudflare Tunnels | 5 relays | ~140 MB |
+| **512 MB VPS** | Tailscale Mesh-VPN | 5 – 10 relays | ~50 – 60 MB |
+| **1 GB VPS** | TryCloudflare Tunnels | 5 – 10 relays | ~140 – 250 MB |
+| **2 GB+ VPS** | TryCloudflare Tunnels | 10 – 20 relays | ~250 – 500 MB |
+
+---
+
+## Connecting to Your Agent (`pi-freeflow`)
+
+Once `./setup.sh` completes, copy the printed commands and paste them into your OMP or Pi agent chat:
+
+```text
+/freeflow add https://alpha-bravo.trycloudflare.com relay-1
+/freeflow add https://charlie-delta.trycloudflare.com relay-2
+/freeflow add https://echo-foxtrot.trycloudflare.com relay-3
+/freeflow add https://golf-hotel.trycloudflare.com relay-4
+/freeflow add https://india-juliet.trycloudflare.com relay-5
+```
+
+Then manage your pool in agent chat:
+- `/freeflow status` — check all configured relays and their active health
+- `/freeflow test` — run real upstream streaming inference tests across all relays
+- `/freeflow spread` — distribute parallel subagent tasks across all relays simultaneously
+
+---
+
+## Security Model (Safe for Public Internet)
+
+Even when exposed over public TryCloudflare HTTPS URLs, the relay is strictly protected:
+- **Strict Target Allowlist:** The relay router (`server.mjs`) strictly enforces `RELAY_ALLOWED_TARGETS` (`https://opencode.ai`, `https://api.kilo.ai` by default).
+- Requests to any other origin (or malicious targets) return **HTTP 403 Forbidden** immediately.
+- Only inference streaming requests conforming to the `x-relay-target` protocol are forwarded.
+
+---
+
+## Manual Deployment
+
+If you prefer manual control over the compose generation and lifecycle:
+
+### Option A: TryCloudflare Quick Tunnels (Zero VPN required)
 ```bash
-# 1. Start the pool (10 relays by default, 11 containers: 10 WARP + 1 relay)
-./generate-compose.sh 10
+./generate-compose.sh 5 --with-tunnels
 docker compose up -d --build
-
-# 2. Read live state: port, egress IP, client commands
 ./get-status.sh
-
-# 3. Wire the pool (one line per relay, from step 2)
-#    /freeflow add http://<tailscale-ip>:310N relay-N
-#    then: /freeflow status, /freeflow list, /freeflow test
-#    modes: /freeflow auto | /freeflow spread (parallel subagents) | /freeflow off
 ```
 
-Mesh-VPN URLs are static: container restarts, daemon reboots, and relay
-rebuilds never change them. No remote hop either — probes typically answer
-in half the time of a tunnel round-trip.
-
-## Fallback: Quick Tunnels (hosts without VPN)
-
+### Option B: Tailscale Mesh-VPN Direct
 ```bash
-./generate-compose.sh 10 --with-tunnels
+./generate-compose.sh 5
 docker compose up -d --build
-./get-status.sh   # prints live tunnel URLs + /freeflow add lines
+./get-status.sh
 ```
 
-Tunnels are ephemeral by design: any `tunnel-N` restart mints a new edge
-URL, so re-run `./get-status.sh` and re-paste the client lines after one.
-Never restart `tunnel-N` for a throttled relay — that trades a per-egress
-429 for pool-wide URL churn. The generator never emits `depends_on: - relay`
-on tunnels, so relay rebuilds can't cascade-restart them.
+---
 
-Client: [pi-freeflow](https://github.com/trefeon/pi-freeflow) — the OMP/Pi
-extension (npm `pi-freeflow`) — failover behavior lives there, see its
-[relays.md failover table](https://github.com/trefeon/pi-freeflow/blob/main/docs/pages/relays.md).
-Upstream targets are OpenCode Zen (`https://opencode.ai`) and Kilo
-(`https://api.kilo.ai`). Request shape: `x-relay-target` (origin, absent
-= health check) plus `x-relay-path` (default `/`), gated by the allowlist
-(`RELAY_ALLOWED_TARGETS` env, default `https://opencode.ai`, `https://api.kilo.ai`)
-Full lifecycle, deploy, client wiring, operations, FAQ: [`docs/`](docs/).
+## Rotation Rule: Warp-Only
 
-## Dual-purpose WARP stack
+When a relay gets throttled (HTTP 429), **only restart its `warp-N` container**:
+```bash
+docker restart warp-relay-warp-1
+```
+- **Never restart `tunnel-N` or `relay`**:
+  - Restarting `tunnel-N` generates a new `.trycloudflare.com` URL, breaking configured client lines.
+  - Restarting `relay` drops active connections across all relays.
+- Restarting `warp-N` acquires a fresh Cloudflare egress IP while keeping your public tunnel URL and relay port completely stable.
+- The automated monitor (`keep-cold.mjs`) follows this rule strictly.
 
-Each `warp-N` also publishes its raw proxy on host port `<10800+N>`
-(`10801`–`10810` at COUNT=10), so co-hosted consumers can use the same
-egress IPs directly (from sibling containers via the Docker gateway
-`<docker-gateway>:1080N`), zero conflict with the relay router:
-
-- Raw proxy: `<docker-gateway>:10801..10810` → `warp-N:1080`
-- Relay router: `<tailscale-ip>:3101..3110` → relay `:3001..3010`
-
-Port-collision note: pick host ranges clear of local services. The relay
-router defaults to `3101`– instead of `3001`-on-host because host port
-`3002` is commonly claimed (example: a local dev API on `:3002`); adjust
-the `ports:` line if your host differs.
-
-## Why one port per relay (not a single load balancer)
-
-- **Reasoning-issuer affinity:** reasoning models return encrypted
-  reasoning decryptable only by the issuing egress IP. The client pins
-  follow-up turns to the issuing relay; a blind load balancer would route
-  turn 2 to a different egress and break the conversation.
-- **Failure isolation:** one 429 cools down one relay; the other nine keep
-  serving without dropping turns.
-- **Hedging:** a stalled relay can be raced against a second egress path —
-  impossible behind a single endpoint.
-
-## Rotation rule: warp-only
-
-Throttled relay → restart only its `warp-N`
-(`docker restart warp-relay-warp-N`), or let the keep-cold timer do it:
-
+To run a single probe pass manually:
 ```bash
 node keep-cold.mjs --once
-sudo cp systemd/warp-keep-cold.{service,timer} /etc/systemd/system/
-# edit User/WorkingDirectory paths to your checkout first, then:
-sudo systemctl enable --now warp-keep-cold.timer
 ```
 
-Never restart `tunnel-N` or `relay` for a hot egress — tunnel restarts
-mint new edge URLs and break every configured client line.
+---
 
-Rebuild, don't restart: the image is `COPY`-baked, so after editing
-`server.mjs`: `docker compose build relay && docker compose up -d relay`.
-
-## File map
+## File Map
 
 | File | Role |
 | ---- | ---- |
 | `setup.sh` | Interactive and non-interactive auto-setup wizard with VPS hardware sizing |
-| `server.mjs` | Relay app: allowlist proxy, one listener per `300N`, SSE/no-buffer streaming |
+| `server.mjs` | Relay router: allowlist proxy, one listener per `300N`, SSE/no-buffer streaming |
 | `keep-cold.mjs` | Two-tier 429 prober / rotator for MicroWARP backends (`--once` or `--loop`) |
 | `docker-compose.yml` | N × MicroWARP + relay app; tunnels appended only by `--with-tunnels` |
-| `Dockerfile` / `package.json` | Relay image (COPY-baked) / deps |
+| `Dockerfile` / `package.json` | Relay image (COPY-baked) / dependencies |
 | `generate-compose.sh` | Regenerate `docker-compose.yml`: `[count] [--with-tunnels] [--legacy-warp]` |
-| `get-status.sh` | Status script: prints mesh-VPN + tunnel URLs, egress IPs, client commands (output stays on host) |
+| `get-status.sh` | Status script: prints public tunnel URLs, egress IPs, client commands |
 | `systemd/` | systemd service units and timers for keep-cold and logwatch |
-| `docs/` | [Numbered guides](docs/) (01–05) |
+| `docs/` | Step-by-step technical guides (01–05) |
 | `warp-lite/` | Minimal MicroWARP image source (Alpine WireGuard + microsocks, ~1.8 MiB runtime) |
 
-## Privacy rule
+---
 
-No live tunnel URLs, egress IPs, account IDs, tokens, emails, or LAN
-addresses are ever committed. `get-status.sh` output stays on the host;
-docs use `<RELAY-N-URL>` / `<EGRESS-IP>` / `<tailscale-ip>`. (`*.trycloudflare.com` in docs
-means the Quick Tunnel domain pattern, never a live address.)
+## Privacy Rule
+
+No live tunnel URLs, egress IPs, account IDs, tokens, emails, or private host addresses are ever committed. `get-status.sh` output stays on the host; docs use `<RELAY-N-URL>` / `<EGRESS-IP>` / `<tailscale-ip>`. (`*.trycloudflare.com` in docs means the Quick Tunnel domain pattern, never a live address.)

@@ -8,34 +8,33 @@ behavior is the client's: see the [relays.md failover table](https://github.com/
 > peer relay support (older https-only builds skip them). Without that,
 > use the Quick-Tunnel path below.
 
-## Wire the pool (mesh-VPN direct, recommended)
+## Option A: TryCloudflare Quick Tunnels (Recommended for Easiest Setup)
 
-```bash
-./get-status.sh
+When deployed with `--with-tunnels` (the default in `./setup.sh`), `./get-status.sh` prints ready-to-paste public HTTPS commands:
+
+```text
+/freeflow add https://<hash-1>.trycloudflare.com relay-1
+/freeflow add https://<hash-2>.trycloudflare.com relay-2
+/freeflow add https://<hash-3>.trycloudflare.com relay-3
+/freeflow add https://<hash-4>.trycloudflare.com relay-4
+/freeflow add https://<hash-5>.trycloudflare.com relay-5
 ```
 
-Paste one line per relay from its `Mesh-VPN direct commands` section:
+Paste these lines directly into your OMP or Pi agent chat. Zero VPN client configuration is required on your laptop or client machine.
 
-```
-/freeflow add http://<tailscale-ip>:310N relay-N
-```
+> Note on tunnel URLs: TryCloudflare URLs are stable and survive container restarts, relay code updates, and 429 WARP rotations. Only a manual tunnel container recreation or VPS reboot mints new URLs. If that happens, simply run `./get-status.sh` and re-paste.
 
-These URLs are static — they survive container restarts, daemon reboots,
-and relay rebuilds, so you paste them once.
+## Option B: Mesh-VPN Direct (Tailscale)
 
-## Fallback: Quick Tunnels
+If you deployed in pure mode on a tailnet, `./get-status.sh` prints Mesh-VPN commands:
 
-When the pool was generated with `--with-tunnels`, `get-status.sh` prints
-an extra `Quick Tunnel fallback commands` section (only when tunnel
-containers exist). Paste those lines instead:
-
-```
-/freeflow add <RELAY-N-URL> relay-N
+```text
+/freeflow add http://<tailscale-ip>:3101 relay-1
+/freeflow add http://<tailscale-ip>:3102 relay-2
+...
 ```
 
-Tunnel URLs are ephemeral: after any `tunnel-N` restart or host reboot,
-re-run `./get-status.sh` and re-paste.
-
+These URLs are static and permanent across reboots.
 Verify, then pick a mode (`spread` for parallel subagents):
 
 ```

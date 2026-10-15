@@ -7,23 +7,18 @@ creates — the OMP/Pi extension (npm `pi-freeflow`): same
 (`https://opencode.ai`, `https://api.kilo.ai`). Client-side failover lives
 there — see its [relays.md failover table](https://github.com/trefeon/pi-freeflow/blob/main/docs/pages/relays.md);
 this repo documents the relay side only, not its model catalog.
+One `relay` process exposes N listeners (`BASE_PORT+N`, default `3001`–`3000+N`).
+Each listener forwards through its own MicroWARP client's SOCKS proxy
+(`warp-N:1080`, ~1.8 MiB RAM each) and is reachable two ways:
 
-One `relay` process exposes N listeners (`BASE_PORT+N`, default `3001`–`3010`).
-Each listener forwards through its own WARP client's SOCKS proxy
-(`warp-N:1080`) and is reachable two ways: mesh-VPN direct on host port
-`310N` (recommended, static) or, with `--with-tunnels`, a per-relay Quick
-Tunnel (`tunnel-N → http://10.244.0.100:300N`). See `server.mjs`,
-`docker-compose.yml`.
+1. **TryCloudflare Quick Tunnels (`--with-tunnels`):** Each relay is exposed as a public HTTPS URL (`https://<hash>.trycloudflare.com`). Zero configuration required—no Cloudflare account, domain, or client-side VPN needed.
+2. **Mesh-VPN Direct (Tailscale):** Static private URLs (`http://<tailscale-ip>:310N`) published directly over an encrypted WireGuard mesh network.
 
 ```
-[OMP/Pi via pi-freeflow] ──► http://<tailscale-ip>:310N (mesh-VPN, static)
-                          └─► <RELAY-N-URL> (Quick Tunnel, ephemeral)
-      ──► [relay :300N] ──► [warp-N SOCKS :1080] ──► [upstream API, egress <EGRESS-IP>]
+[OMP/Pi via pi-freeflow] ──► https://<hash>.trycloudflare.com (TryCloudflare, public HTTPS)
+                          └─► http://<tailscale-ip>:310N      (Mesh-VPN, static private)
+      ──► [relay :300N] ──► [MicroWARP SOCKS :1080] ──► [upstream API, egress <EGRESS-IP>]
 ```
-
-> Client requirement: mesh-VPN `http://` relay URLs need a pi-freeflow
-> build with mesh-VPN peer relay support. Older https-only builds skip
-> them and fall back to direct mode.
 
 ## Request lifecycle
 
@@ -59,27 +54,20 @@ curl -s -N http://10.244.0.100:3001/v1/models \
   -H "x-relay-path: /zen/v1/models"
 ```
 
-## Ingress: mesh-VPN direct (recommended) vs Quick Tunnel (fallback)
+## Ingress options: TryCloudflare Quick Tunnels vs Mesh-VPN
 
-Mesh-VPN direct maps host ports `3101`– to container ports `3001`–
-(`ports: "3101-<3100+N>:3001-<3000+N>"` on `relay`), so
-`http://<tailscale-ip>:310N` reaches relay `:300N` over the encrypted
-mesh — no account, no DNS, no open inbound port, and URLs that never
-change across container recreations, daemon reboots, or host restarts.
-Use the `3101`-base host range (not `3001`-on-host) when something on the
-host already claims a port in `3001`– (a local dev API on `:3002` is the
-classic collision); adjust the `ports:` line to whatever range is free.
+### 1. TryCloudflare Quick Tunnels (`--with-tunnels`): Recommended for Easiest Setup
 
-`cloudflare/cloudflared:latest` with
-`tunnel --no-autoupdate --url http://10.244.0.100:300N` (via
-`./generate-compose.sh N --with-tunnels`) needs no account either and
-suits hosts where no VPN can be installed — each `tunnel-N` mints a public
-`*.trycloudflare.com` URL for exactly one relay port. Ephemeral by design:
-a `tunnel-N` restart mints a new URL, so rotations never touch tunnels
-(see [04](04-operations-keep-cold.md)), and the generator never emits
-`depends_on: - relay` on tunnels, so relay rebuilds can't cascade-restart
-them either.
+Running `./generate-compose.sh N --with-tunnels` pairs each relay port (`300N`) with a lightweight `cloudflare/cloudflared:latest` container (~18–20 MiB RAM).
+- **Zero configuration:** No Cloudflare account, custom domain, API token, or router port-forwarding needed. Cloudflare automatically issues a secure public HTTPS URL ending in `.trycloudflare.com`.
+- **Security allowlist:** Although the tunnel URLs are public, the relay router strictly rejects any request whose target is not in `RELAY_ALLOWED_TARGETS` (`opencode.ai`, `api.kilo.ai`) with `HTTP 403 Forbidden`.
+- **URL stability:** Tunnels run as independent sibling containers. Rebuilding the relay app or restarting WARP clients (for 429 rotation) does **not** restart the tunnels or change their URLs.
 
+### 2. Mesh-VPN Direct (Tailscale)
+
+Maps host ports `3101`– to container ports `3001`– (`ports: "3101-<3100+N>:3001-<3000+N>"` on `relay`), so `http://<tailscale-ip>:310N` reaches relay `:300N` over your private encrypted Tailscale network.
+- **Static:** URLs never change across container recreations, host reboots, or updates.
+- **Private:** No traffic passes over public tunnel endpoints.
 ## Why one port per relay (not a single load balancer)
 
 - **Reasoning-issuer affinity:** reasoning models return encrypted

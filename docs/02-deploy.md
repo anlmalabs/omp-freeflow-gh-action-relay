@@ -10,29 +10,38 @@ For mesh-VPN ingress, the host must already be joined to your tailnet.
 ./setup.sh
 ```
 
-The wizard inspects VPS RAM/CPU, detects Tailscale, builds the minimal MicroWARP image (~1.8 MiB RAM/node), generates compose, starts containers, and installs the keep-cold systemd timer. Pass `-y` to accept all detected recommendations automatically.
+The interactive wizard handles everything automatically:
+- Checks and installs missing prerequisites (Docker, Docker Compose, Node.js).
+- Detects VPS RAM and CPU cores, recommends safe relay limits, and defaults to the **5-relay sweet spot** (~140 MB total RAM).
+- Builds the minimal MicroWARP image (`warp-lite:latest`, ~1.8 MiB RAM/node).
+- Deploys TryCloudflare Quick Tunnels (public HTTPS URLs, zero client VPN needed) or Mesh-VPN direct.
+- Installs the `warp-keep-cold.timer` systemd service for automatic 429 rate-limit recovery.
+- Prints the copy-paste `/freeflow add` commands ready for your agent.
 
-## Manual start (mesh-VPN direct, recommended)
+To run non-interactively with auto-detected recommendations:
+```bash
+./setup.sh -y
+```
+
+---
+
+## Manual Deployment
+
+### Option A: TryCloudflare Quick Tunnels (Recommended for public access)
 
 ```bash
-./generate-compose.sh 10     # pure mode: 10 MicroWARP + 1 relay, no tunnels
-docker compose up -d --build # 11 containers (~60 MiB resident total)
+./generate-compose.sh 5 --with-tunnels
+docker compose up -d --build # ~140 MiB resident total for 5 relays + tunnels
+./get-status.sh              # prints live public tunnel URLs + client commands
+```
+
+### Option B: Mesh-VPN Direct (Tailscale)
+
+```bash
+./generate-compose.sh 5     # pure mode: MicroWARP + relay, no tunnels
+docker compose up -d --build # ~50 MiB resident total for 5 relays
 ./get-status.sh              # ports, egress IPs, mesh-VPN client commands
 ```
-Pure mode publishes two port sets off the host: `warp-N` raw proxies on
-`10801`– (for co-hosted consumers, see README) and the relay router on
-`3101`– → container `3001`– (mesh-VPN ingress). If a host port in either
-range is already claimed (a local dev API on `:3002` is the classic
-collision), pick a free range and edit the `ports:` lines before `up`.
-
-## Fallback: Quick Tunnels (hosts without VPN)
-
-```bash
-./generate-compose.sh 10 --with-tunnels
-docker compose up -d --build # +10 cloudflared (~250 MiB resident total)
-./get-status.sh              # also prints live tunnel URLs + client lines
-```
-
 `get-status.sh [count]` (default `COUNT` env, else 10) reads live state
 off the host: egress IPs from
 `docker exec warp-relay-warp-N curl …/cdn-cgi/trace`, tunnel URLs from
@@ -54,9 +63,9 @@ default naming needs no configuration.
 ## Keep-cold timer (systemd)
 
 ```bash
-node keep-cold-lite.mjs --once      # one pass now; exit 0 when all clean
+node keep-cold.mjs --once      # one pass now; exit 0 when all clean
 sudo cp systemd/warp-keep-cold.{service,timer} /etc/systemd/system/
-# edit <USER> paths in both files first, then:
+# edit paths to your checkout first, then:
 sudo systemctl enable --now warp-keep-cold.timer
 ```
 
