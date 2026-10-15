@@ -1,0 +1,26 @@
+# Install (Docker Linux host):
+#   1. Copy this file to /etc/systemd/system/warp-logwatch.service
+#      (and warp-logwatch.timer alongside it).
+#   2. Edit the User=/Group=/WorkingDirectory=/ExecStart= paths below.
+#      Defaults assume the pool lives at /opt/warp-relay-pool — adjust
+#      if yours differs (e.g. /home/user/warp-relay-pool).
+#   3. systemctl daemon-reload && systemctl enable --now warp-logwatch.timer
+# Read-only on the pool: scrapes `docker logs` + the keep-cold journal
+# into logs/errors.log. Never restarts or rebuilds any container.
+[Unit]
+Description=Central error-log watcher for the WARP relay pool
+Documentation=file:/opt/warp-relay-pool/logwatch.sh
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Edit to the user that owns the checkout (required for system units).
+User=warp-relay
+Group=warp-relay
+WorkingDirectory=/opt/warp-relay-pool
+# A scrape is seconds of docker/journal reads; 5 min is ample headroom.
+TimeoutStartSec=300
+ExecStart=/usr/bin/flock -n /tmp/warp-logwatch.lock /bin/sh /opt/warp-relay-pool/logwatch.sh
+StandardOutput=journal
+StandardError=journal

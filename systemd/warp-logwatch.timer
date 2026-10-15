@@ -1,0 +1,14 @@
+# Install alongside warp-logwatch.service (see its header), then:
+# systemctl daemon-reload && systemctl enable --now warp-logwatch.timer
+
+[Unit]
+Description=Scrape warp-relay pool logs for errors every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnCalendar=*:0/2
+AccuracySec=15s
+Unit=warp-logwatch.service
+
+[Install]
+WantedBy=timers.target

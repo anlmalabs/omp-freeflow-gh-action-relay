@@ -1,0 +1,99 @@
+# 01 — Overview: how it works
+
+Self-hosted Docker/WARP alternative to the Workers/Deno/Vercel relays
+[pi-freeflow](https://github.com/trefeon/pi-freeflow)'s `/freeflow deploy`
+creates — the OMP/Pi extension (npm `pi-freeflow`): same
+`x-relay-target`/`x-relay-path` protocol, same allowlist
+(`https://opencode.ai`, `https://api.kilo.ai`). Client-side failover lives
+there — see its [relays.md failover table](https://github.com/trefeon/pi-freeflow/blob/main/docs/pages/relays.md);
+this repo documents the relay side only, not its model catalog.
+
+One `relay` process exposes N listeners (`BASE_PORT+N`, default `3001`–`3010`).
+Each listener forwards through its own WARP client's SOCKS proxy
+(`warp-N:1080`) and is reachable two ways: mesh-VPN direct on host port
+`310N` (recommended, static) or, with `--with-tunnels`, a per-relay Quick
+Tunnel (`tunnel-N → http://10.244.0.100:300N`). See `server.mjs`,
+`docker-compose.yml`.
+
+```
+[OMP/Pi via pi-freeflow] ──► http://<tailscale-ip>:310N (mesh-VPN, static)
+                          └─► <RELAY-N-URL> (Quick Tunnel, ephemeral)
+      ──► [relay :300N] ──► [warp-N SOCKS :1080] ──► [upstream API, egress <EGRESS-IP>]
+```
+
+> Client requirement: mesh-VPN `http://` relay URLs need a pi-freeflow
+> build with mesh-VPN peer relay support. Older https-only builds skip
+> them and fall back to direct mode.
+
+## Request lifecycle
+
+1. Client sends the request to the relay URL with two headers
+   (`server.mjs`: `x-relay-target`, `x-relay-path`).
+2. Relay strips those headers (plus `host`), forwards
+   `method + headers + body` to `target + relayPath` via that relay's
+   own `ProxyAgent` dispatcher (`undici`), 5-minute cap
+   (`AbortSignal.timeout(300000)`), client-disconnect abort wiring.
+3. Relay answers with `cache-control: no-cache`,
+   `x-accel-buffering: no`, upstream `content-type` only, `flushHeaders()`
+   before the first body byte, then `pipeline(Readable.fromWeb(body), res)`
+   — SSE tokens stream, nothing buffers. See `server.mjs`.
+4. No `x-relay-target` header = health check: relay fetches
+   `https://cloudflare.com/cdn-cgi/trace` through its own dispatcher and
+   returns `Relay #N OK (via http://warp-N:1080)` plus the trace body.
+   A per-relay egress proof, not a load-balancer ping.
+5. Target not in the allowlist (`RELAY_ALLOWED_TARGETS`, default
+   `https://opencode.ai`, `https://api.kilo.ai`) = `403 {"error":"Forbidden target"}`.
+
+## Header protocol
+
+| Header | Required | Meaning |
+| --- | --- | --- |
+| `x-relay-target` | no | Upstream origin, trailing `/` stripped. Absent = health check. |
+| `x-relay-path` | no | Path appended to target. Default `/`. |
+
+Minimal forward example (relay 1 on its bridge address):
+
+```bash
+curl -s -N http://10.244.0.100:3001/v1/models \
+  -H "x-relay-target: https://opencode.ai" \
+  -H "x-relay-path: /zen/v1/models"
+```
+
+## Ingress: mesh-VPN direct (recommended) vs Quick Tunnel (fallback)
+
+Mesh-VPN direct maps host ports `3101`– to container ports `3001`–
+(`ports: "3101-<3100+N>:3001-<3000+N>"` on `relay`), so
+`http://<tailscale-ip>:310N` reaches relay `:300N` over the encrypted
+mesh — no account, no DNS, no open inbound port, and URLs that never
+change across container recreations, daemon reboots, or host restarts.
+Use the `3101`-base host range (not `3001`-on-host) when something on the
+host already claims a port in `3001`– (a local dev API on `:3002` is the
+classic collision); adjust the `ports:` line to whatever range is free.
+
+`cloudflare/cloudflared:latest` with
+`tunnel --no-autoupdate --url http://10.244.0.100:300N` (via
+`./generate-compose.sh N --with-tunnels`) needs no account either and
+suits hosts where no VPN can be installed — each `tunnel-N` mints a public
+`*.trycloudflare.com` URL for exactly one relay port. Ephemeral by design:
+a `tunnel-N` restart mints a new URL, so rotations never touch tunnels
+(see [04](04-operations-keep-cold.md)), and the generator never emits
+`depends_on: - relay` on tunnels, so relay rebuilds can't cascade-restart
+them either.
+
+## Why one port per relay (not a single load balancer)
+
+- **Reasoning-issuer affinity:** reasoning models return encrypted
+  reasoning decryptable only by the issuing egress IP. The client pins
+  follow-up turns to the issuing relay; a blind load balancer would route
+  turn 2 to a different egress and break the conversation.
+- **Failure isolation:** one hot egress cools down one relay while the
+  rest keep serving — behind one endpoint, a single 429 poisons everything.
+- **Hedging:** the client can race a stalled relay against a second egress
+  path; a single endpoint gives it nothing to race with.
+
+## Why per-relay WARP egress
+
+Each `warp-N` (minimal MicroWARP `warp-lite:latest`, `NET_ADMIN`) owns its egress
+address, so upstream per-IP throttling (HTTP 429) hits one relay, not the
+pool. Rotating one `warp-N` buys a fresh `<EGRESS-IP>` while every
+client URL keeps working. That isolation is the whole pool design.

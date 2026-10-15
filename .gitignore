@@ -1,0 +1,32 @@
+# runtime logs
+*.log
+# secrets / local env
+.env*
+!.env.example
+# local compose overrides (never committed)
+docker-compose.override.yml
+# deps
+node_modules/
+# relay state snapshots (client-side pool state, never committed)
+*relay-state*
+# keep-cold local state
+.keep-cold/
+keep-cold*.state
+# vendor reference clones (read-only study material, never committed)
+/reference/
+
+# identity material (never committed)
+accounts/
+warp-lite/accounts/
+deployment/accounts/
+backups/
+warp*.conf
+wgcf-*.conf
+wgcf-*.toml
+warp-*.toml
+*-reg.json
+warp.conf
+# logwatch runtime outputs (local test runs must not dirty the tree)
+/logs/
+# private dev docs and local deployment snapshots (never committed)
+devdocs/

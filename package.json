@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "undici": "^7.4.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "name": "warp-relay",
+  "scripts": {
+    "probe": "node keep-cold.mjs",
+    "start": "node server.mjs"
+  },
+  "type": "module",
+  "version": "1.0.0"
+}

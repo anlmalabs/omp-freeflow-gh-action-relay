@@ -1,0 +1,14 @@
+# Install alongside warp-keep-cold.service (see its header), then:
+# systemctl daemon-reload && systemctl enable --now warp-keep-cold.timer
+
+[Unit]
+Description=Run the WARP keep-cold relay probe every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*:0/5
+AccuracySec=30s
+Unit=warp-keep-cold.service
+
+[Install]
+WantedBy=timers.target
