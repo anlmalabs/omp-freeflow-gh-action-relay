@@ -70,11 +70,11 @@ For most users and developers running parallel coding subagents, **5 relays** is
 Once `./setup.sh` completes, copy the printed commands and paste them into your OMP or Pi agent chat:
 
 ```text
-/freeflow add https://alpha-bravo.trycloudflare.com relay-1
-/freeflow add https://charlie-delta.trycloudflare.com relay-2
-/freeflow add https://echo-foxtrot.trycloudflare.com relay-3
-/freeflow add https://golf-hotel.trycloudflare.com relay-4
-/freeflow add https://india-juliet.trycloudflare.com relay-5
+/freeflow add https://<hash-1>.trycloudflare.com relay-1
+/freeflow add https://<hash-2>.trycloudflare.com relay-2
+/freeflow add https://<hash-3>.trycloudflare.com relay-3
+/freeflow add https://<hash-4>.trycloudflare.com relay-4
+/freeflow add https://<hash-5>.trycloudflare.com relay-5
 ```
 
 Then manage your pool in agent chat:
@@ -149,6 +149,6 @@ node keep-cold.mjs --once
 
 ---
 
-## Privacy Rule
+## Security & Privacy
 
-No live tunnel URLs, egress IPs, account IDs, tokens, emails, or private host addresses are ever committed. `get-status.sh` output stays on the host; docs use `<RELAY-N-URL>` / `<EGRESS-IP>` / `<tailscale-ip>`. (`*.trycloudflare.com` in docs means the Quick Tunnel domain pattern, never a live address.)
+Repository privacy rules — no live tunnel URLs, egress IPs, account IDs, tokens, emails, or private host addresses are ever committed; docs use `<RELAY-N-URL>` / `<EGRESS-IP>` / `<tailscale-ip>`, and `*.trycloudflare.com` always means the Quick Tunnel domain pattern — plus the full security model and vulnerability reporting live in [SECURITY.md](SECURITY.md).

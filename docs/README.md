@@ -19,4 +19,4 @@ Numbered user journey. Read in order.
 Privacy: live tunnel URLs and egress IPs never enter this repo — use
 `<RELAY-N-URL>` / `<EGRESS-IP>` / `<tailscale-ip>`. Real addresses live only
 in host `get-status.sh` output. `*.trycloudflare.com` below means the Quick Tunnel
-domain pattern, never a live address.
+domain pattern, never a live address. Canonical rules: [SECURITY.md](../SECURITY.md).

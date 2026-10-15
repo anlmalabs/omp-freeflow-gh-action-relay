@@ -22,6 +22,8 @@ versions or benchmarks.
 - Never commit tunnel URLs (`<RELAY-N-URL>`) or egress IPs (`<EGRESS-IP>`).
 - `get-status.sh` output stays host-only; scrub it before pasting.
 - Use the `<RELAY-N-URL>` / `<EGRESS-IP>` placeholders in docs and issues.
+- Canonical rules, security model, and vulnerability reporting:
+  [SECURITY.md](SECURITY.md).
 
 ## Smoke check
 
