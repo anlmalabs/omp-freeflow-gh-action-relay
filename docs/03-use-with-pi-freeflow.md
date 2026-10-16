@@ -70,9 +70,10 @@ WARP egress):
 curl -s <RELAY-1-URL>/
 ```
 
-`500 … proxy error` = that relay's `warp-N` SOCKS path is down; check
-`tunnel-N` logs only if every relay fails the same way (shared relay app
-or host network, not one egress).
+`Relay #N health check failed` (HTTP `500`) = that relay's `warp-N`
+SOCKS path is down; check `tunnel-N` logs only if every relay fails the
+same way (shared relay app or host network, not one egress). A healthy
+relay answers `200` with its Cloudflare trace body.
 
 ## Forwarded request shape
 

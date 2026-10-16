@@ -52,9 +52,14 @@ output is host-only — never commit it.
 ## Rescale to N relays
 
 ```bash
-./generate-compose.sh <N> [--with-tunnels]  # rewrites docker-compose.yml, RELAY_COUNT=N
+./generate-compose.sh <N> [--with-tunnels] [--legacy-warp]  # rewrites docker-compose.yml, RELAY_COUNT=N
 docker compose up -d --build
 ```
+
+`--legacy-warp` swaps the minimal MicroWARP image for
+`caomingjun/warp:latest` (~100 MiB per relay instead of ~1.8 MiB). Every
+sizing figure in this repo assumes warp-lite — with this flag a 5-relay
+pool needs >500 MiB, so do not pick it on a 512 MB VPS.
 
 Topology is fixed by the generator: bridge `10.244.0.0/16`, relay app at
 `10.244.0.100`, `tunnel-N → http://10.244.0.100:300N` (tunnels mode only),
