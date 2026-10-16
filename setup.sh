@@ -3,6 +3,37 @@
 # Uses MicroWARP (~1.8 MiB RAM/node) and TryCloudflare Quick Tunnels for instant setup.
 set -eu
 
+# Load .env when present (same loader as generate-compose.sh: process env
+# wins, KEY=VALUE only, CRLF-safe, no value ever evaluated — EXCEPT that
+# COUNT/RELAY_COUNT are excluded below: the wizard's VPS sizing owns the
+# pool size, while the generator honors .env COUNT for manual runs). The
+# wizard writes the final COUNT and BASE_PORT into the installed unit, so
+# these values are the single source for the compose file AND the prober.
+if [ -f .env ]; then
+  cr="$(printf '\r')"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    val="${val%"$cr"}"
+    case "$key" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
+    # The wizard owns the pool size for wizard-driven installs (VPS sizing),
+    # so a copied .env.example COUNT=10 does not silently out-vote the
+    # recommended count on a small VPS; pin one with `COUNT=5 ./setup.sh`
+    # (process env still wins above). BASE_PORT and the binds DO flow here:
+    # generate-compose.sh bakes them and the unit must match.
+    case "$key" in COUNT|RELAY_COUNT) continue ;; esac
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    # shellcheck disable=SC2163,SC2086 # key is validated above
+    eval "cur=\${$key:-}"
+    [ -n "$cur" ] || export "$key=$val"
+  done < .env
+fi
+
 BOLD="\033[1m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
@@ -232,13 +263,23 @@ echo ""
 # 3. Interactive Relay Selection
 # -------------------------------------------------------------
 COUNT="${COUNT:-$REC_COUNT}"
+case "$COUNT" in
+  ''|*[!0-9]*)
+    log_warn "COUNT='${COUNT}' is not a number; using the recommended ${REC_COUNT}."
+    COUNT="$REC_COUNT"
+    ;;
+esac
+if [ "$COUNT" -gt "$MAX_RELAYS" ]; then
+  log_warn "COUNT=${COUNT} exceeds the safe maximum for this VPS (${MAX_RELAYS}); using ${MAX_RELAYS}."
+  COUNT="$MAX_RELAYS"
+fi
 INGRESS_CHOICE="${INGRESS:-tunnels}" # TryCloudflare is default for "just works" public access
 
 if [ "$AUTO_YES" = true ]; then
   log_info "Non-interactive mode (-y): using recommended count = ${COUNT} relays."
   log_info "Ingress method: TryCloudflare Quick Tunnels (public HTTPS URLs)."
 else
-  printf "How many relays do you want to create? [1-%s, default: %s]: " "$MAX_RELAYS" "$REC_COUNT"
+  printf "How many relays do you want to create? [1-%s, default: %s]: " "$MAX_RELAYS" "$COUNT"
   read -r user_count || true
   if [ -n "$user_count" ]; then
     COUNT="$user_count"
@@ -267,6 +308,22 @@ else
       INGRESS_CHOICE="tunnels"
     fi
   fi
+fi
+
+# Interactive input can exceed the safe maximum (the clamp above only covers
+# env/-y paths); re-validate the resolved count before anything uses it.
+case "$COUNT" in
+  ''|*[!0-9]*)
+    log_warn "COUNT='${COUNT}' is not a number; using the recommended ${REC_COUNT}."
+    COUNT="$REC_COUNT"
+    ;;
+esac
+if [ "$COUNT" -gt "$MAX_RELAYS" ]; then
+  log_warn "COUNT=${COUNT} exceeds the safe maximum for this VPS (${MAX_RELAYS}); using ${MAX_RELAYS}."
+  COUNT="$MAX_RELAYS"
+fi
+if [ "$COUNT" -lt 1 ]; then
+  COUNT=1
 fi
 
 WITH_TUNNELS_FLAG=""
@@ -356,6 +413,8 @@ if [ -n "$NODE_BIN" ] && command -v systemctl >/dev/null 2>&1; then
         -e "s|^WorkingDirectory=.*|WorkingDirectory=${CURRENT_DIR}|" \
         -e "s|^Documentation=.*|Documentation=file:${CURRENT_DIR}/keep-cold.mjs|" \
         -e "s|^Environment=KEEP_COLD_LOG=.*|Environment=KEEP_COLD_LOG=${CURRENT_DIR}/keep-cold.log|" \
+        -e "s|^Environment=COUNT=.*|Environment=COUNT=${COUNT}|" \
+        -e "s|^Environment=BASE_PORT=.*|Environment=BASE_PORT=${BASE_PORT:-3000}|" \
         -e "s|^ExecStart=.*|ExecStart=/usr/bin/flock -n /tmp/warp-keep-cold.lock ${NODE_BIN} ${CURRENT_DIR}/keep-cold.mjs --once|" \
         systemd/warp-keep-cold.service > "$TMP_SERVICE"
 

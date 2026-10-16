@@ -12,6 +12,36 @@
 # Rotation rule: restart warp-N only, never tunnel-N/relay.
 set -eu
 
+# Load .env when present. Only KEY=VALUE lines with shell-safe key names are
+# applied, and values already present in the process environment win — so
+# `COUNT=5 ./generate-compose.sh` and setup.sh prompts are never overridden.
+# The relevant values are baked into the generated compose file, which is why
+# editing .env alone changes nothing until this script runs again.
+if [ -f .env ]; then
+  cr="$(printf '\r')"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    # A value-less line is not a KEY=VALUE assignment — skip it instead of
+    # self-assigning KEY=KEY.
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    # Windows-authored files may carry CRLF: a stray CR in a baked value
+    # (URL, comma-list) would silently break matching downstream.
+    val="${val%"$cr"}"
+    # Shell-identifier keys only; a leading digit would alias positional
+    # parameters or die under `set -u` despite the skip contract.
+    case "$key" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    # shellcheck disable=SC2163,SC2086 # key is validated above
+    eval "cur=\${$key:-}"
+    [ -n "$cur" ] || export "$key=$val"
+  done < .env
+fi
+
 COUNT="${COUNT:-10}"
 WITH_TUNNELS=false
 USE_LITE=true
@@ -36,10 +66,11 @@ if [ "$COUNT" -lt 1 ] || [ "$COUNT" -gt 64 ]; then
 fi
 if [ "$WITH_TUNNELS" = true ]; then TUNNEL_FLAG=" --with-tunnels"; else TUNNEL_FLAG=""; fi
 
+BASE_PORT="${BASE_PORT:-3000}"
 HOST_LO=$((3100 + 1))
 HOST_HI=$((3100 + COUNT))
-CONT_LO=$((3000 + 1))
-CONT_HI=$((3000 + COUNT))
+CONT_LO=$((BASE_PORT + 1))
+CONT_HI=$((BASE_PORT + COUNT))
 
 # Host binds default to loopback: the SOCKS proxies are unauthenticated and
 # the relay router trusts anyone who can reach it. The relay app dials
@@ -69,6 +100,8 @@ cat <<HEADER
 # Topology: bridge 10.244.0.0/16, relay app fixed at 10.244.0.100.
 # warp-N raw SOCKS5 proxy on ${SOCKS_BIND}:<10800+N> (override bind: WARP_BIND),
 # ${ROUTER_LINE}.
+# Relay app env (RELAY_COUNT, BASE_PORT, RELAY_ALLOWED_TARGETS) is baked from
+# the generation-time environment / .env — regenerate after editing either.
 networks:
   default:
     ipam:
@@ -136,6 +169,8 @@ cat <<ENTRY
     restart: always
     environment:
       - RELAY_COUNT=${COUNT}
+      - BASE_PORT=${BASE_PORT:-3000}
+      - RELAY_ALLOWED_TARGETS=${RELAY_ALLOWED_TARGETS:-https://opencode.ai,https://api.kilo.ai}
     networks:
       default:
         ipv4_address: 10.244.0.100
@@ -149,6 +184,8 @@ cat <<ENTRY
     restart: always
     environment:
       - RELAY_COUNT=${COUNT}
+      - BASE_PORT=${BASE_PORT:-3000}
+      - RELAY_ALLOWED_TARGETS=${RELAY_ALLOWED_TARGETS:-https://opencode.ai,https://api.kilo.ai}
     networks:
       default:
         ipv4_address: 10.244.0.100
@@ -172,7 +209,7 @@ if [ "$WITH_TUNNELS" = true ]; then
 # and breaks every configured client line).
 i=1
 while [ "$i" -le "$COUNT" ]; do
-PORT=$((3000 + i))
+PORT=$((BASE_PORT + i))
 cat <<ENTRY
   tunnel-${i}:
     image: cloudflare/cloudflared:latest
