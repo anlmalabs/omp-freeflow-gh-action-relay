@@ -1,6 +1,6 @@
 # 03 — Use with pi-freeflow (OMP/Pi client)
 
-This pool is the self-hosted Docker/WARP alternative to the relays
+This pool is the self-hosted Docker alternative to the relays
 `/freeflow deploy` creates — same protocol, same allowlist. Failover
 behavior is the client's: see the [relays.md failover table](https://github.com/trefeon/pi-freeflow/blob/main/docs/pages/relays.md).
 
@@ -22,7 +22,10 @@ When deployed with `--with-tunnels` (the default in `./setup.sh`), `./get-status
 
 Paste these lines directly into your OMP or Pi agent chat. Zero VPN client configuration is required on your laptop or client machine.
 
-> Note on tunnel URLs: TryCloudflare URLs are stable and survive container restarts, relay code updates, and 429 WARP rotations. Only a manual tunnel container recreation or VPS reboot mints new URLs. If that happens, simply run `./get-status.sh` and re-paste.
+> Note on tunnel URLs: TryCloudflare URLs are stable and survive container restarts and relay code updates. Only a manual tunnel container recreation or host reboot mints new URLs. If that happens, simply run `./get-status.sh` and re-paste.
+>
+> On a GitHub Actions pool, the same applies but stronger: the pool only
+> exists while the job runs, so URLs change on every run by definition.
 
 ## Option B: Mesh-VPN Direct (Tailscale)
 
@@ -45,35 +48,40 @@ Verify, then pick a mode (`spread` for parallel subagents):
 ```
 
 Modes: `/freeflow auto` | `/freeflow spread` | `/freeflow off`.
-One entry per relay (relay-1 … relay-N); the client fans out across them,
-each keeping its own WARP egress.
+One entry per relay (relay-1 … relay-N); the client fans out across them.
+All relays share the deploy host's egress IP, so `/freeflow spread` spreads
+concurrency, not upstream identity — an upstream 429 hits every entry at once
+(see [01](01-overview-how-it-works.md#why-per-relay-egress-is-gone)).
 
 ## Health checks
 
-No `x-relay-target` header = relay answers directly through its own WARP
-client. Per-relay, via the bridge (from the Docker host):
+No `x-relay-target` header = relay answers directly, reporting its own
+listener state plus the shared egress. From the deploy host, over the mesh
+mode's loopback publish:
 
 ```bash
-curl -s http://10.244.0.100:3001/          # Relay #1 OK + cdn-cgi/trace body
+curl -s http://127.0.0.1:3101/             # Relay #1 OK (direct) + cdn-cgi/trace body
 ```
 
-Via the mesh address (same path the client uses):
+Over the tailnet address (same path a mesh client uses):
 
 ```bash
 curl -s http://<tailscale-ip>:3101/
 ```
 
 Via the public URL, tunnels mode only (full path — edge, tunnel, relay,
-WARP egress):
+direct egress). This is the only ingress on a GitHub Actions runner, where
+neither port family is host-published:
 
 ```bash
 curl -s <RELAY-1-URL>/
 ```
 
-`Relay #N health check failed` (HTTP `500`) = that relay's `warp-N`
-SOCKS path is down; check `tunnel-N` logs only if every relay fails the
-same way (shared relay app or host network, not one egress). A healthy
-relay answers `200` with its Cloudflare trace body.
+`Relay #N health check failed` (HTTP `500`) = that relay could not reach
+`cloudflare.com` from the host — check host egress and the relay container.
+Note the trace body shows the one shared `<EGRESS-IP>` for the whole pool,
+not a per-relay address. A healthy relay answers `200` with its Cloudflare
+trace body.
 
 ## Forwarded request shape
 

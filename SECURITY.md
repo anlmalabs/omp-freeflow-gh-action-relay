@@ -1,9 +1,11 @@
 # Security Policy
 
-warp-relay-pool pairs Cloudflare WARP egress addresses with public HTTPS
+warp-relay-pool exposes relay listeners under public HTTPS
 (TryCloudflare Quick Tunnel) or private (Tailscale Mesh-VPN) URLs so AI
-coding agents can reach a fixed set of upstream APIs. This document covers
-the security model, the repository privacy rules, and how to report issues.
+coding agents can reach a fixed set of upstream APIs. Egress is direct:
+every request leaves from the host's own IP, so all relays in a pool share
+one upstream address. This document covers the security model, the
+repository privacy rules, and how to report issues.
 
 ## Security model
 
@@ -16,29 +18,33 @@ only ever reach allowlisted hosts — it is not a general-purpose open proxy.
 
 **No client authentication.** The relay trusts anyone who can reach a
 listener. Possession of a relay URL is enough to (a) make allowlisted
-upstream requests through that relay's egress IP and (b) read the relay's
-current egress IP from the built-in health check (a request without
-`x-relay-target` returns the Cloudflare trace for that egress). Treat relay
-URLs as sensitive even though Tunnel URLs are public by construction.
+upstream requests through the pool's egress IP and (b) read that egress IP
+from the built-in health check (a request without `x-relay-target` returns
+the Cloudflare trace). Treat relay URLs as sensitive even though Tunnel URLs
+are public by construction.
 
-**Host-published ports.** Both port families bind to `127.0.0.1` by
+**Shared egress is not anonymity.** With no WARP layer, upstreams see one
+address — the VPS IP, or on a GitHub Actions pool the runner's public IP.
+Upstream 429s apply per-IP, so one limit throttles every relay in the pool at
+once. Nothing here rotates the IP: the only way to change upstream identity
+is to redeploy elsewhere (for a runner, start a new run).
+
+**Host-published ports.** The relay router binds to `127.0.0.1` by
 default: nothing is reachable from the internet unless you opt in.
 
-- `10800+N` → raw WARP SOCKS5 proxy. No allowlist — a plain egress proxy.
-  Expose deliberately with `WARP_BIND=0.0.0.0` (or an interface address)
-  at generation time; when exposed, keep it on loopback, your Tailscale
-  interface, or a trusted network — never the open internet.
 - `3100+N` → relay router (mesh-VPN ingress), published only in mesh mode;
   `setup.sh` sets `INGRESS_BIND` to the VPS Tailscale IP. In tunnels mode
-  it is not host-published at all — tunnels reach it in-network at
-  `http://10.244.0.100:300N`.
-- Overrides: `WARP_BIND=<addr> ./generate-compose.sh N` and
-  `INGRESS_BIND=<addr> ./generate-compose.sh N` (default `127.0.0.1`).
-  Binds are IPv4 only (an IPv6 value is rejected at generation time).
-- Interface-specific SOCKS binds (`WARP_BIND=10.0.0.5`) have no loopback
-  listener: set `SOCKS_HOST=<that address>` for keep-cold's probes
-  (`get-status.sh` reads the bind from the compose file automatically).
-  `0.0.0.0` keeps loopback working and needs no change.
+  it is not host-published at all — tunnels reach it over the compose
+  network by Docker service DNS (`http://relay:300N`).
+- Overrides: `INGRESS_BIND=<addr> ./generate-compose.sh N` (default
+  `127.0.0.1`). Binds are IPv4 only (an IPv6 value is rejected at
+  generation time).
+- The former `10800+N` raw WARP SOCKS5 proxies and their `WARP_BIND` /
+  `SOCKS_HOST` overrides are gone with the WARP layer. That port family was
+  an unauthenticated, un-allowlisted egress proxy; the relay router behind
+  `3100+N` is the only remaining host-facing surface.
+- On a GitHub Actions pool, neither port family is published on the runner:
+  cloudflared URLs are the only ingress, and they are public by construction.
 
 Docker publishes ports via DNAT before host `INPUT` rules are evaluated, so
 a plain `ufw`/`firewalld` setup does not filter these mappings; use

@@ -1,0 +1,138 @@
+name: Relay pool
+
+# On-demand warp-relay-pool for direct-egress use: no VPS, no WARP. The relay
+# router egresses straight from the runner IP, so every relay in the pool shares
+# one upstream address. Read the safety warning in README.md before triggering.
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Number of relays (1-20). All relays egress from this runner's single IP."
+        type: number
+        default: 5
+
+# One pool at a time. A dispatch made while a pool is already running queues
+# behind it instead of tearing a live pool (and its tunnel URLs) down mid-job.
+concurrency:
+  group: relay-pool
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  relay-pool:
+    runs-on: ubuntu-latest
+    # GitHub caps a job at 6h; the pool is only ever as long-lived as the job.
+    timeout-minutes: 360
+    outputs:
+      url: ${{ steps.tunnels.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # workflow_dispatch inputs arrive unvalidated — GitHub enforces no
+      # min/max — so gate the documented 1-20 range before anything builds.
+      # The value is passed via env (never interpolated into the script body).
+      - name: Validate relay count
+        id: validate
+        env:
+          COUNT_INPUT: ${{ inputs.count }}
+        run: |
+          count="$COUNT_INPUT"
+          case "$count" in
+            ''|*[!0-9]*)
+              echo "::error::count must be an integer between 1 and 20, got '$count'"
+              exit 1
+              ;;
+          esac
+          if [ "$count" -lt 1 ] || [ "$count" -gt 20 ]; then
+            echo "::error::count must be between 1 and 20, got '$count'"
+            exit 1
+          fi
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Generate compose file
+        # The validated count comes from the step above, not the raw input.
+        run: sh generate-compose.sh "${COUNT}" --with-tunnels
+        env:
+          COUNT: ${{ steps.validate.outputs.count }}
+
+      - name: Start the pool
+        run: docker compose up -d --build
+
+      # cloudflared prints its quick-tunnel URL on startup. Wait until every
+      # tunnel-N has logged one, then take the first URL per tunnel in tunnel
+      # order so relay-1 is always tunnel-1.
+      - name: Wait for quick tunnels
+        id: tunnels
+        timeout-minutes: 6
+        env:
+          COUNT: ${{ steps.validate.outputs.count }}
+        run: |
+          set -eu
+          count="$COUNT"
+          urls="$RUNNER_TEMP/relay-urls.txt"
+          : > "$urls"
+          deadline=$(( $(date +%s) + 300 ))
+          while :; do
+            ready=0
+            i=1
+            while [ "$i" -le "$count" ]; do
+              if docker compose logs --no-color "tunnel-$i" 2>/dev/null | grep -q 'trycloudflare.com'; then
+                ready=$((ready + 1))
+              fi
+              i=$((i + 1))
+            done
+            if [ "$ready" -eq "$count" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::only ${ready}/${count} tunnels reported a trycloudflare.com URL"
+              exit 1
+            fi
+            echo "waiting for quick tunnels (${ready}/${count} ready)"
+            sleep 5
+          done
+          i=1
+          while [ "$i" -le "$count" ]; do
+            url="$(docker compose logs --no-color "tunnel-$i" 2>/dev/null \
+              | grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' | head -n 1)"
+            if ! grep -qxF "$url" "$urls"; then
+              printf '%s\n' "$url" >> "$urls"
+            fi
+            i=$((i + 1))
+          done
+          {
+            echo "url<<EOF"
+            cat "$urls"
+            echo "EOF"
+            echo "ready=$(wc -l < "$urls")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Print relay URLs
+        run: |
+          echo "Relay pool URLs (one per relay, tunnel order):"
+          i=1
+          while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            echo "  relay-$i  $url"
+            echo "  /freeflow add $url relay-$i"
+            i=$((i + 1))
+          done < "$RUNNER_TEMP/relay-urls.txt"
+
+      - name: Compose logs
+        if: failure()
+        run: docker compose logs --no-color | tail -n 500
+
+      # The job is the pool's lifetime: block here so the tunnels stay up until
+      # the job timeout (or a manual cancel), when the runner is destroyed.
+      - name: Hold the pool until the job timeout
+        run: |
+          set -eu
+          deadline=$(( $(date +%s) + 350 * 60 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            up="$(docker compose ps --services --filter status=running | wc -l)"
+            echo "pool alive $(date -u '+%H:%M:%SZ') — ${up} running service(s); URLs are in the steps above"
+            sleep 300
+          done
+          echo "hold window elapsed"

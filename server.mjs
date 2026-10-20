@@ -1,7 +1,7 @@
 import http from "node:http";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { ProxyAgent } from "undici";
+import { Agent } from "undici";
 
 const COUNT = parseInt(process.env.RELAY_COUNT || "10", 10);
 const BASE_PORT = parseInt(process.env.BASE_PORT || "3000", 10);
@@ -13,6 +13,17 @@ const ALLOWED_TARGETS = (process.env.RELAY_ALLOWED_TARGETS ?? DEFAULT_ALLOWED_TA
   .split(",")
   .map((s) => s.trim().replace(/\/$/, ""))
   .filter(Boolean);
+
+// Direct egress: the relay app dials the upstream from its own host/runner
+// address. One shared Agent keeps the previous connection pooling/keep-alive
+// profile so cloudflared still reuses upstream sockets.
+const AGENT = new Agent({
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 90_000,
+  headersTimeout: 60_000,
+  bodyTimeout: 0,
+  connections: 32,
+});
 
 // Log-and-continue on programming errors: one bad request must never take
 // down all 10 listeners in this process. Logging keeps the failure visible
@@ -26,10 +37,6 @@ process.on("uncaughtException", (err) => {
 
 function createRelayInstance(index) {
   const port = BASE_PORT + index;
-  const warpHost = process.env[`WARP_HOST_${index}`] || `warp-${index}`;
-  const warpPort = process.env[`WARP_PORT_${index}`] || "1080";
-  const proxyUrl = `socks5://${warpHost}:${warpPort}`;
-  const dispatcher = new ProxyAgent({ uri: proxyUrl, keepAliveTimeout: 60_000, keepAliveMaxTimeout: 90_000, headersTimeout: 60_000, bodyTimeout: 0, connections: 32 });
 
   const server = http.createServer(async (req, res) => {
     const target = req.headers[HEADER_TARGET]?.replace(/\/$/, "");
@@ -38,10 +45,10 @@ function createRelayInstance(index) {
     // Direct health check: only when NO x-relay-target header is passed
     if (!target) {
       try {
-        const trace = await fetch("https://cloudflare.com/cdn-cgi/trace", { dispatcher });
+        const trace = await fetch("https://cloudflare.com/cdn-cgi/trace", { dispatcher: AGENT });
         const text = await trace.text();
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-        return res.end(`Relay #${index} OK (via ${proxyUrl})\n\n${text}`);
+        return res.end(`Relay #${index} OK (direct)\n\n${text}`);
       } catch (err) {
         // Detail stays in the logs: the body used to reflect String(err).
         console.error(`[relay #${index}] health check failed: ${err?.stack ?? String(err)}`);
@@ -101,7 +108,7 @@ function createRelayInstance(index) {
         headers,
         body: req.method !== "GET" && req.method !== "HEAD" ? req : undefined,
         duplex: "half",
-        dispatcher,
+        dispatcher: AGENT,
         signal: AbortSignal.any([upstreamTimeout, controller.signal]),
       });
 
@@ -150,7 +157,7 @@ function createRelayInstance(index) {
   server.on("connection", (socket) => socket.setNoDelay(true));
 
   server.listen(port, "0.0.0.0", () => {
-    console.log(`Relay #${index} listening on 0.0.0.0:${port} -> ${proxyUrl}`);
+    console.log(`Relay #${index} listening on 0.0.0.0:${port} -> direct`);
   });
 }
 

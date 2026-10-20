@@ -1,7 +1,8 @@
 # 02 — Deploy
 
-Runs on a Docker Linux host (needs `NET_ADMIN` for WARP; not Windows).
-Prereqs: `docker compose` and `node` (node only for `keep-cold.mjs`).
+Runs on any Docker Linux host, or ephemerally on a GitHub Actions runner (see
+[GitHub Actions deployment](../README.md#github-actions-deployment)).
+Prereqs: `docker compose` only (node only for `keep-cold.mjs`).
 For mesh-VPN ingress, the host must already be joined to your tailnet.
 
 ## Quickest: Automated Setup Wizard
@@ -12,16 +13,22 @@ For mesh-VPN ingress, the host must already be joined to your tailnet.
 
 The interactive wizard handles everything automatically:
 - Checks and installs missing prerequisites (Docker, Docker Compose, Node.js).
-- Detects VPS RAM and CPU cores, recommends safe relay limits, and defaults to the **5-relay sweet spot** (~160 MB total RAM).
-- Builds the minimal MicroWARP image (`warp-lite:latest`, ~1.8 MiB RAM/node).
+- Detects VPS RAM and CPU cores, recommends safe relay limits, and defaults to the **5-relay sweet spot**.
+- Builds the relay image — a single `server.mjs` process exposing N listeners, no per-relay egress clients.
 - Deploys TryCloudflare Quick Tunnels (public HTTPS URLs, zero client VPN needed) or Mesh-VPN direct.
-- Installs the `warp-keep-cold.timer` systemd service for automatic 429 rate-limit recovery.
+- Installs the `warp-keep-cold.timer` systemd service — a legacy WARP-era
+  prober (unmigrated to direct egress); see
+  [04](04-operations-keep-cold.md).
 - Prints the copy-paste `/freeflow add` commands ready for your agent.
 
 To run non-interactively with auto-detected recommendations:
 ```bash
 ./setup.sh -y
 ```
+
+**Before deploying anywhere, read the safety warning in
+[README.md](../README.md#read-this-first-safety).** Direct egress means the
+host or runner IP is what upstreams see, and Quick Tunnel URLs are public.
 
 ---
 
@@ -31,60 +38,63 @@ To run non-interactively with auto-detected recommendations:
 
 ```bash
 ./generate-compose.sh 5 --with-tunnels
-docker compose up -d --build # ~160 MiB resident total for 5 relays + tunnels
+docker compose up -d --build
 ./get-status.sh              # prints live public tunnel URLs + client commands
 ```
 
 ### Option B: Mesh-VPN Direct (Tailscale)
 
 ```bash
-./generate-compose.sh 5     # pure mode: MicroWARP + relay, no tunnels
-docker compose up -d --build # ~50 MiB resident total for 5 relays
-./get-status.sh              # ports, egress IPs, mesh-VPN client commands
+./generate-compose.sh 5     # pure mode: relay only, no tunnels
+docker compose up -d --build
+./get-status.sh              # ports, shared egress IP, client commands
 ```
+
 `get-status.sh [count]` (default `COUNT` env, else 10) reads live state
-off the host: egress IPs primarily via the host-side SOCKS probe
-(`curl -x socks5h://127.0.0.1:<10800+N>` against that relay's WARP
-egress, with a `docker exec warp-relay-warp-N curl …/cdn-cgi/trace`
-fallback), tunnel URLs from `docker logs warp-relay-tunnel-N`. Its
-output is host-only — never commit it.
+off the host: egress IP via the relay health check, tunnel URLs from
+`docker logs warp-relay-tunnel-N`. Its output is host-only — never commit it.
+
+### Option C: GitHub Actions (on-demand, ephemeral)
+
+`./generate-compose.sh <count> --with-tunnels` is also what the
+`relay-pool` workflow runs on `ubuntu-latest`. Trigger it from the
+**Actions → Relay pool → Run workflow** tab, take the URLs from the job
+log or the `url` job output, and treat the pool as disposable: it dies
+when the job does, and GitHub caps a job at 6 hours. Use a throwaway
+account — see the README warning.
 
 ## Rescale to N relays
 
 ```bash
-./generate-compose.sh <N> [--with-tunnels] [--legacy-warp]  # rewrites docker-compose.yml, RELAY_COUNT=N
+./generate-compose.sh <N> [--with-tunnels]  # rewrites docker-compose.yml, RELAY_COUNT=N
 docker compose up -d --build
 ```
 
-`--legacy-warp` swaps the minimal MicroWARP image for
-`caomingjun/warp:latest` (~100 MiB per relay instead of ~1.8 MiB). Every
-sizing figure in this repo assumes warp-lite — with this flag a 5-relay
-pool needs >500 MiB, so do not pick it on a 512 MB VPS.
-
-Topology is fixed by the generator: bridge `10.244.0.0/16`, relay app at
-`10.244.0.100`, `tunnel-N → http://10.244.0.100:300N` (tunnels mode only),
-`warp-N` on `:1080` (raw proxy on host `<10800+N>`; loopback by default).
-Host binds default to loopback; override with `WARP_BIND=<addr>` (SOCKS
-family) and `INGRESS_BIND=<addr>` (relay router, mesh mode only — tunnels
-mode does not host-publish the router at all). The wizard sets
-`INGRESS_BIND` to the VPS Tailscale IP automatically. Binds are IPv4 only;
-an interface-specific `WARP_BIND` (not `127.0.0.1`/`0.0.0.0`) needs
-`SOCKS_HOST=<addr>` for keep-cold's probes (`get-status.sh` reads the bind
-from the compose file itself).
+Topology is fixed by the generator: one relay container exposing listeners
+`3001`–`3000+N` (`BASE_PORT+N`), each forwarding directly to the upstream
+from the host IP. There is no static bridge address and no bridge ipam
+config any more — in tunnels mode `tunnel-N` reaches the relay by Docker
+service DNS (`http://relay:300N`); in mesh mode the same ports are published
+as `${INGRESS_BIND}:3101-<3100+N>`.
+Host binds default to loopback; override with
+`INGRESS_BIND=<addr>` (relay router, mesh mode only — tunnels mode does not
+host-publish the router at all). Binds are IPv4 only.
 `WARP_HOST_N` / `WARP_PORT_N` env overrides exist in `server.mjs` but the
 default naming needs no configuration.
+
+A GitHub Actions runner has no per-VPS sizing to respect — pick `count` by
+how many parallel `/freeflow` entries you want, not by RAM.
 
 ## Keep-cold timer (systemd)
 
 ```bash
 node keep-cold.mjs --once      # one pass now; exit 0 when all clean
 sudo cp systemd/warp-keep-cold.{service,timer} /etc/systemd/system/
-# edit paths to your checkout first, then:
+# edit paths in the unit to your checkout first, then:
 sudo systemctl enable --now warp-keep-cold.timer
 ```
 
-The service is `Type=oneshot` with `TimeoutStartSec=900` (a pass can
-rotate several relays, each waiting for WARP re-handshake) and `flock -n`
+The service is `Type=oneshot` with `TimeoutStartSec=900` and `flock -n`
 so overlapping timer fires never stack. The timer fires every 5 minutes
 (`OnCalendar`). Without `--loop`, one pass = one timer fire.
 See [04](04-operations-keep-cold.md) for tuning (notably
@@ -92,13 +102,13 @@ See [04](04-operations-keep-cold.md) for tuning (notably
 
 ## Error watcher (logwatch, optional)
 
-`logwatch.sh` scrapes the relay/WARP container logs and the keep-cold
+`logwatch.sh` scrapes the relay container logs and the keep-cold
 journal into `logs/errors.log` (rotated) and writes per-relay/day tallies
 for rollover summaries; state lives in `logs/.cursor` / `.last` /
 `.events`.
 
 ```bash
-sudo cp systemd/warp-logwatch.{service,timer} /etc/systemd/system/  # edit paths first
+sudo cp systemd/warp-logwatch.{service,timer} /etc/system/system/  # edit paths first
 sudo systemctl enable --now warp-logwatch.timer   # every 2 minutes; flock-guarded
 ```
 
