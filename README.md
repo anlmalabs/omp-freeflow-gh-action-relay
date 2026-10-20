@@ -2,7 +2,7 @@
 
 Self-hosted Docker direct-egress relay pool for AI coding agents ([pi-freeflow](https://github.com/trefeon/pi-freeflow), OMP, Pi).
 
-Provides N relay listeners paired with public HTTPS URLs via **Cloudflare Quick Tunnels (TryCloudflare)** or private static URLs via **Tailscale Mesh-VPN**. Each relay forwards requests straight to the upstream from the host's own IP — there is no WARP client, no SOCKS proxy, and no per-relay egress address. The background `keep-cold` prober is **legacy WARP-era tooling not yet migrated to direct egress**: its rotations target `warp-N` containers this compose file no longer creates, and its SOCKS readiness checks have no listener to reach; see [docs/04](docs/04-operations-keep-cold.md).
+Provides N relay listeners paired with public HTTPS URLs via **Cloudflare Quick Tunnels (TryCloudflare)** or private static URLs via **Tailscale Mesh-VPN**. Each relay forwards requests straight to the upstream from the host's own IP — there is no WARP client, no SOCKS proxy, and no per-relay egress address. The background prober (`probe.mjs`, run by the `warp-keep-cold.timer` systemd timer) is **detection only**: it probes every relay with a real streaming inference request per model, reports throttling per relay+model, and touches no container, tunnel, or the relay app. It dials the relays from the host, so it only measures a pool whose relay router is published there (mesh/direct ingress); in tunnels mode it has no address for the relays and exits 2 ("could not measure"). Exit codes: 0 = every probed relay/model answered 200, 1 = at least one was throttled or failed, 2 = the pool could not be measured. **This repo is on hold** — see the note below.
 
 ```
 [OMP / Pi via pi-freeflow]
@@ -42,6 +42,26 @@ Provides N relay listeners paired with public HTTPS URLs via **Cloudflare Quick 
 >   upstream per-IP 429 hits the *whole pool at once*, and restarting anything
 >   cannot buy a new IP. This pool spreads concurrency, not upstream identity.
 
+> [!NOTE]
+> ## On hold
+>
+> **This repo is on hold.** The code is merged and working — the relay pool,
+> the tunnels and the client setup are all functional as they stand — but it
+> is parked: no further work on it is planned for now, and nothing here will
+> be extended, reworked or maintained until it is picked back up.
+>
+> That includes the throttle prober (`probe.mjs` and the
+> `warp-keep-cold.timer` that runs it): detection only, exit codes 0 = clean,
+> 1 = throttled or failed, 2 = could not measure. The wizard installs the
+> timer in mesh/direct ingress mode only, since in tunnels mode the prober
+> has no host address for the relays.
+>
+> Deployments that already exist keep working. Nothing in the pool depends on
+> the prober, and the only thing it ever did was report upstream 429s —
+> which, under direct egress, no restart can clear anyway.
+>
+> Prober details and tunables: [docs/04](docs/04-operations-keep-cold.md).
+
 ---
 
 ## Quickstart: One-Command Auto Setup
@@ -64,7 +84,7 @@ Or run non-interactively with auto-detected sizing recommendations:
 2. **Hardware Sizing:** Detects VPS RAM and CPU cores, recommends safe relay limits, and defaults to the **5-relay sweet spot**.
 3. **Relay Image Build:** Builds the single-process relay router — N listeners, one container, no per-relay egress client.
 4. **TryCloudflare Tunnel Wiring:** Automatically exposes each relay on a public HTTPS URL without requiring any Cloudflare account, domain name, or open inbound firewall ports.
-5. **Keep-Cold Service:** Installs and enables the `warp-keep-cold.timer` systemd service to probe relays for HTTP 429 every 5 minutes — legacy WARP-era tooling that reports throttling and cannot rotate egress under direct egress (see [docs/04](docs/04-operations-keep-cold.md)).
+5. **Keep-Cold Service:** Installs and enables the `warp-keep-cold.timer` systemd service to probe relays for HTTP 429 every 5 minutes — detection only: it reports throttling per relay+model and restarts nothing, since direct egress gives it no other IP to rotate to (see [docs/04](docs/04-operations-keep-cold.md)). The prober reaches the relays over the host, so it needs the relay router published there: the wizard installs the timer in mesh/direct ingress mode and skips it for Quick Tunnels, where a pass would exit 2 ("could not measure").
 6. **Client Commands:** Prints ready-to-paste `/freeflow add` commands directly into your terminal.
 
 ---
@@ -204,15 +224,21 @@ docker ps --filter name=warp-relay-tunnel-   # tunnels to leave alone
 - `docker compose restart relay` is never the fix for stale code either: the
   image is `COPY`-baked, so rebuild after editing `server.mjs`
   (`docker compose build relay && docker compose up -d relay`).
-- The automated monitor (`keep-cold.mjs`) touches neither `tunnel-N` nor
-  `relay`, but it is legacy WARP-era tooling: its restarts target containers
-  this compose file no longer creates, so a pass reports throttling rather
-  than fixing it. See [docs/04](docs/04-operations-keep-cold.md).
+- The automated monitor (`probe.mjs`) touches neither `tunnel-N` nor `relay`
+  — it makes no docker calls at all — so public URLs and in-flight
+  connections survive a pass. It also has nothing to gain from touching
+  them: direct egress means a restart cannot change the upstream IP, so a
+  pass reports throttling rather than fixing it. See
+  [docs/04](docs/04-operations-keep-cold.md).
 
-To run a single probe pass manually (WARP-era; expect failed rotations):
+To run a single probe pass manually:
 ```bash
-node keep-cold.mjs --once
+node probe.mjs --once
 ```
+One pass exits 0 when every probed relay/model answered 200, 1 when at least
+one was throttled (429) or failed, and 2 when the pool could not be measured
+— for example in tunnels mode, where the relays have no host address to
+probe.
 
 ---
 
@@ -250,7 +276,7 @@ client URLs with a strict allowlist behind them — see
 | ---- | ---- |
 | `setup.sh` | Interactive and non-interactive auto-setup wizard with VPS hardware sizing |
 | `server.mjs` | Relay router: allowlist proxy, one listener per `300N`, SSE/no-buffer streaming |
-| `keep-cold.mjs` | 429 prober for the relay pool (`--once` or `--loop`); still targets the legacy per-relay WARP containers — see [docs/04](docs/04-operations-keep-cold.md) |
+| `probe.mjs` | Throttle detector for the relay pool (`--once` or `--loop`): one streaming inference request per model per relay, reports per relay+model, restarts nothing; needs the host-published router (mesh mode); exit 0 = clean, 1 = throttled/failed, 2 = could not measure — see [docs/04](docs/04-operations-keep-cold.md) |
 | `docker-compose.yml` | Relay app with N listeners; tunnels appended only by `--with-tunnels` |
 | `Dockerfile` / `package.json` | Relay image (COPY-baked) / dependencies |
 | `generate-compose.sh` | Regenerate `docker-compose.yml`: `[count] [--with-tunnels]` |

@@ -9,9 +9,6 @@ docker-compose.override.yml
 node_modules/
 # relay state snapshots (client-side pool state, never committed)
 *relay-state*
-# keep-cold local state
-.keep-cold/
-keep-cold*.state
 # vendor reference clones (read-only study material, never committed)
 /reference/
 

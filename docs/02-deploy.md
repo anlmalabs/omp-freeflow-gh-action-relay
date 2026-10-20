@@ -2,7 +2,7 @@
 
 Runs on any Docker Linux host, or ephemerally on a GitHub Actions runner (see
 [GitHub Actions deployment](../README.md#github-actions-deployment)).
-Prereqs: `docker compose` only (node only for `keep-cold.mjs`).
+Prereqs: `docker compose` only (node only for `probe.mjs`).
 For mesh-VPN ingress, the host must already be joined to your tailnet.
 
 ## Quickest: Automated Setup Wizard
@@ -16,9 +16,11 @@ The interactive wizard handles everything automatically:
 - Detects VPS RAM and CPU cores, recommends safe relay limits, and defaults to the **5-relay sweet spot**.
 - Builds the relay image — a single `server.mjs` process exposing N listeners, no per-relay egress clients.
 - Deploys TryCloudflare Quick Tunnels (public HTTPS URLs, zero client VPN needed) or Mesh-VPN direct.
-- Installs the `warp-keep-cold.timer` systemd service — a legacy WARP-era
-  prober (unmigrated to direct egress); see
-  [04](04-operations-keep-cold.md).
+- Installs the `warp-keep-cold.timer` systemd service, which runs
+  `probe.mjs` every 5 minutes — detection only, no restarts (direct egress
+  leaves no other IP to rotate to); see [04](04-operations-keep-cold.md).
+  Installed in mesh/direct ingress mode only: the prober reaches the relays
+  over the host, so it needs the relay router published there.
 - Prints the copy-paste `/freeflow add` commands ready for your agent.
 
 To run non-interactively with auto-detected recommendations:
@@ -88,17 +90,53 @@ how many parallel `/freeflow` entries you want, not by RAM.
 ## Keep-cold timer (systemd)
 
 ```bash
-node keep-cold.mjs --once      # one pass now; exit 0 when all clean
+node probe.mjs --once          # one pass now; exit 0 = every probed relay/model answered 200
 sudo cp systemd/warp-keep-cold.{service,timer} /etc/systemd/system/
 # edit paths in the unit to your checkout first, then:
 sudo systemctl enable --now warp-keep-cold.timer
 ```
 
+Exit codes of one pass: **0** — every probed relay/model answered 200;
+**1** — at least one relay/model was throttled (429) or failed (unreachable,
+an unexpected status, or a `server_error` inside a 200); **2** — the pass
+could not measure the pool (invalid configuration, or a topology it cannot
+address).
+
+The timer only works in **mesh/direct ingress mode**, where the relay router
+is published on the host (`docker-compose.yml` carries
+`- "<bind>:3101-3110:3001-3010"`). The prober dials the relays from the host,
+so in tunnels mode (`--with-tunnels`, the wizard's default) it has no address
+for them: it logs one line naming the cause and exits 2 ("could not
+measure") instead of reporting every relay unreachable. That is why
+`setup.sh` skips the timer in tunnels mode — a timer there would fail every
+5 minutes over a healthy pool.
+
 The service is `Type=oneshot` with `TimeoutStartSec=900` and `flock -n`
 so overlapping timer fires never stack. The timer fires every 5 minutes
 (`OnCalendar`). Without `--loop`, one pass = one timer fire.
+The unit sets `KEEP_COLD_LOG` (the self-rotating file log) and `COUNT`;
+the prober's `RELAY_HOST` / `RELAY_BASE_PORT` are deliberately unset so
+`probe.mjs` derives them from the `docker-compose.yml` publish line. Set
+both explicitly to measure a pool whose router is published some other way.
 See [04](04-operations-keep-cold.md) for tuning (notably
 `GLOBAL_QUOTA_GUARD`).
+
+### Upgrading an existing install
+
+The previously installed unit's `ExecStart` pointed at `keep-cold.mjs`, which
+this change removes — an existing host must re-copy the units, or the timer
+fires into a module-not-found error:
+
+```bash
+sudo cp systemd/warp-keep-cold.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now warp-keep-cold.timer
+```
+
+A stale `Environment=BASE_PORT=3000` left over in the old installed unit is
+ignored by the new prober — its port knob is `RELAY_BASE_PORT`, derived from
+the publish line — but it disappears when the unit is re-copied, which is
+worth doing anyway.
 
 ## Error watcher (logwatch, optional)
 

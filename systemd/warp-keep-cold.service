@@ -7,9 +7,26 @@
 #   3. systemctl daemon-reload && systemctl enable --now warp-keep-cold.timer
 # Template note: for a user instance (systemd --user) or an instantiated
 # unit (warp-keep-cold@.service), replace User=/Group= with User=%i.
+#
+# The log is probe.log (self-rotated by probe.mjs); earlier installs wrote
+# keep-cold.log, the filename of the retired WARP-era prober.
+#
+# Exit-code contract of one pass (probe.mjs --once):
+#   0 = every probed relay/model answered 200
+#   1 = at least one relay/model was throttled (429) or failed (unreachable,
+#       unexpected status, or a server_error inside a 200)
+#   2 = the pass could not measure the pool (invalid configuration, or a
+#       topology it cannot address — e.g. tunnels mode)
+#
+# The prober dials the relays FROM THE HOST, so it can only measure a pool
+# whose relay router is published there: mesh/direct ingress mode, where
+# docker-compose.yml carries `- "<bind>:3101-3110:3001-3010"`. In tunnels
+# mode there is no publish line and the relays are reachable only from inside
+# the container, so a pass has no address for them and exits 2 ("could not
+# measure") instead of reporting throttling.
 [Unit]
-Description=Keep the WARP relay pool free of rate-limited egress IPs
-Documentation=file:/opt/warp-relay-pool/keep-cold.mjs
+Description=Detect upstream port throttling for the direct-egress relay pool
+Documentation=file:/opt/warp-relay-pool/probe.mjs
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -19,19 +36,26 @@ Type=oneshot
 User=warp-relay
 Group=warp-relay
 WorkingDirectory=/opt/warp-relay-pool
-# A pass can rotate several relays, and each rotation waits for the WARP client
-# to re-handshake, so this must be well above the default 90s oneshot timeout.
+# A pass probes every relay against every configured model, so allow more
+# than the default 90s oneshot timeout for a full pool pass.
 TimeoutStartSec=900
 # The script rotates its own log, so no shell wrapper is needed here.
 # Adjust the path below to where you cloned this repo.
-Environment=KEEP_COLD_LOG=/opt/warp-relay-pool/keep-cold.log
+Environment=KEEP_COLD_LOG=/opt/warp-relay-pool/probe.log
 # Pool size for the prober: must match the deployed relay count or the pass
 # probes nonexistent relays. The wizard (setup.sh) rewrites this line to the
 # actual count; edit it if you install the unit by hand.
 Environment=COUNT=10
-# Base port of the relay listeners (relay N listens on BASE_PORT+N). Must
-# match the generated compose; the wizard rewrites it from .env/default.
-Environment=BASE_PORT=3000
-ExecStart=/usr/bin/flock -n /tmp/warp-keep-cold.lock /usr/bin/node /opt/warp-relay-pool/keep-cold.mjs --once
+# The prober's port knob is RELAY_BASE_PORT (the HOST-published port of
+# relay 1) and it is deliberately NOT set here. probe.mjs derives it from
+# the generated docker-compose.yml publish line (`<bind>:3101-3110:3001-3010`
+# -> relay 1 on 3101) and dials relay N at RELAY_BASE_PORT + (N-1), while the
+# relay app's own in-container listeners sit at 3001-3010. Injecting the
+# old in-container base (3000) here would make the prober dial dead ports
+# and report every relay unreachable. Set RELAY_BASE_PORT here only to
+# override an unusual publish mapping; RELAY_HOST (the address the router is
+# published on) is derived the same way. Set both explicitly to measure a
+# pool whose router is published some other way.
+ExecStart=/usr/bin/flock -n /tmp/warp-keep-cold.lock /usr/bin/node /opt/warp-relay-pool/probe.mjs --once
 StandardOutput=journal
 StandardError=journal

@@ -7,8 +7,8 @@ set -eu
 # wins, KEY=VALUE only, CRLF-safe, no value ever evaluated — EXCEPT that
 # COUNT/RELAY_COUNT are excluded below: the wizard's VPS sizing owns the
 # pool size, while the generator honors .env COUNT for manual runs). The
-# wizard writes the final COUNT and BASE_PORT into the installed unit, so
-# these values are the single source for the compose file AND the prober.
+# wizard writes the final COUNT into the installed unit, so these values are
+# the single source for the compose file AND the prober's pool size.
 if [ -f .env ]; then
   cr="$(printf '\r')"
   dq='"' # quote characters, so the case patterns need no escapes
@@ -24,7 +24,11 @@ if [ -f .env ]; then
     # so a copied .env.example COUNT=10 does not silently out-vote the
     # recommended count on a small VPS; pin one with `COUNT=5 ./setup.sh`
     # (process env still wins above). BASE_PORT and the binds DO flow here:
-    # generate-compose.sh bakes them and the unit must match.
+    # generate-compose.sh bakes BASE_PORT into the relay's IN-CONTAINER
+    # listeners (3001-3010 at the default); the host publish is always
+    # 3101-<3100+COUNT> and never follows it. The prober's own port knob
+    # (RELAY_BASE_PORT, the HOST-published port of relay 1) is derived from
+    # that publish line, so the unit carries no port override.
     case "$key" in COUNT|RELAY_COUNT) continue ;; esac
     case "$val" in
       "$dq"*) val="${val#"$dq"}"; val="${val%%"$dq"*}" ;;
@@ -160,13 +164,13 @@ else
 fi
 log_ok "Docker and Docker Compose verified ($DOCKER_COMPOSE)."
 
-# Auto-install Node.js if missing (for keep-cold rotation prober)
+# Auto-install Node.js if missing (for the throttle prober)
 NODE_BIN="$(command -v node 2>/dev/null || true)"
 if [ -z "$NODE_BIN" ]; then
-  log_warn "Node.js (>=18) is needed for keep-cold auto-rotation prober."
+  log_warn "Node.js (>=18) is needed for the relay throttle prober."
   DO_INSTALL_NODE=true
   if [ "$AUTO_YES" != true ]; then
-    printf "Install Node.js on the VPS for rate-limit auto-rotation? [Y/n]: "
+    printf "Install Node.js on the VPS for the relay throttle prober? [Y/n]: "
     read -r ans || true
     case "$ans" in
       [nN]*) DO_INSTALL_NODE=false ;;
@@ -393,13 +397,26 @@ else
 fi
 
 # -------------------------------------------------------------
-# 6. Install Keep-Cold Auto-Rotation Service (Systemd)
+# 6. Install Keep-Cold Throttle-Probe Service (Systemd)
 # -------------------------------------------------------------
-if [ -n "$NODE_BIN" ] && command -v systemctl >/dev/null 2>&1; then
+# The prober dials the relays FROM THE HOST, so it can only measure a pool
+# whose relay router is published there: mesh/direct ingress mode, where
+# docker-compose.yml carries `- "<bind>:3101-3110:3001-3010"`. In tunnels
+# mode there is no publish line — the relays are reachable only from inside
+# the container — so the prober has no address for them and exits 2 ("could
+# not measure") instead of reporting throttling. A timer there would fail
+# every 5 minutes over a healthy pool, so the wizard skips it and says why.
+if [ -n "$WITH_TUNNELS_FLAG" ]; then
+  log_warn "Skipping the keep-cold timer: in tunnels mode the relay router is not published on the host."
+  log_warn "probe.mjs probes the relays over the host, and in tunnels mode it has no address for them:"
+  log_warn "every pass would exit 2 (\"could not measure\") over a perfectly healthy pool."
+  log_warn "Remedy: install with mesh/direct ingress (no --with-tunnels) so the router is host-published,"
+  log_warn "or set RELAY_HOST and RELAY_BASE_PORT explicitly if the router is published some other way."
+elif [ -n "$NODE_BIN" ] && command -v systemctl >/dev/null 2>&1; then
   SETUP_SYSTEMD=true
   if [ "$AUTO_YES" != true ]; then
     echo ""
-    printf "Enable keep-cold timer to auto-rotate rate-limited (429) relays? [Y/n]: "
+    printf "Enable keep-cold timer to detect rate-limited (429) relays? [Y/n]: "
     read -r ans || true
     case "$ans" in
       [nN]*) SETUP_SYSTEMD=false ;;
@@ -417,11 +434,10 @@ if [ -n "$NODE_BIN" ] && command -v systemctl >/dev/null 2>&1; then
     sed -e "s|^User=.*|User=${CURRENT_USER}|" \
         -e "s|^Group=.*|Group=${CURRENT_GROUP}|" \
         -e "s|^WorkingDirectory=.*|WorkingDirectory=${CURRENT_DIR}|" \
-        -e "s|^Documentation=.*|Documentation=file:${CURRENT_DIR}/keep-cold.mjs|" \
-        -e "s|^Environment=KEEP_COLD_LOG=.*|Environment=KEEP_COLD_LOG=${CURRENT_DIR}/keep-cold.log|" \
+        -e "s|^Documentation=.*|Documentation=file:${CURRENT_DIR}/probe.mjs|" \
+        -e "s|^Environment=KEEP_COLD_LOG=.*|Environment=KEEP_COLD_LOG=${CURRENT_DIR}/probe.log|" \
         -e "s|^Environment=COUNT=.*|Environment=COUNT=${COUNT}|" \
-        -e "s|^Environment=BASE_PORT=.*|Environment=BASE_PORT=${BASE_PORT:-3000}|" \
-        -e "s|^ExecStart=.*|ExecStart=/usr/bin/flock -n /tmp/warp-keep-cold.lock ${NODE_BIN} ${CURRENT_DIR}/keep-cold.mjs --once|" \
+        -e "s|^ExecStart=.*|ExecStart=/usr/bin/flock -n /tmp/warp-keep-cold.lock ${NODE_BIN} ${CURRENT_DIR}/probe.mjs --once|" \
         systemd/warp-keep-cold.service > "$TMP_SERVICE"
 
     run_elevated cp "$TMP_SERVICE" /etc/systemd/system/warp-keep-cold.service
@@ -429,7 +445,7 @@ if [ -n "$NODE_BIN" ] && command -v systemctl >/dev/null 2>&1; then
     run_elevated systemctl daemon-reload
     run_elevated systemctl enable --now warp-keep-cold.timer
     rm -f "$TMP_SERVICE"
-    log_ok "Keep-cold auto-rotation active: checks every 5 minutes."
+    log_ok "Keep-cold throttle probe active: runs every 5 minutes (detection only)."
   fi
 fi
 
@@ -451,9 +467,15 @@ echo "   /freeflow status   -> verify pool health"
 echo "   /freeflow test     -> run an upstream inference test across all relays"
 echo "   /freeflow spread   -> fan parallel subagents across all relays"
 echo ""
-echo "🔄 Rate-Limit Protection:"
-echo "   If any relay encounters an upstream HTTP 429, keep-cold automatically"
-echo "   rotates that container to a fresh egress IP. Your public tunnel URLs"
-echo "   never change!"
+echo "🔄 Rate-Limit Detection:"
+echo "   probe.mjs probes each relay with a real inference request every 5"
+echo "   minutes and reports upstream HTTP 429 (rate-limit) responses. The"
+echo "   pool egresses directly from the host IP, so it cannot rotate egress —"
+echo "   it never restarts a container, opens a SOCKS proxy, or touches your"
+echo "   tunnel URLs. It detects and reports; you decide what to do."
+echo "   The timer is installed in mesh/direct ingress mode only: the prober"
+echo "   reaches the relays over the host, so it needs the router published"
+echo "   there. In tunnels mode it has no address for them, exits 2 (\"could"
+echo "   not measure\"), and the wizard skips the timer."
 echo "======================================================================="
 echo ""

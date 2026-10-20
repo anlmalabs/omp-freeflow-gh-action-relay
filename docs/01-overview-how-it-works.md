@@ -107,9 +107,12 @@ runner IP. The consequences, plainly:
   no amount of restarting buys a new address. Where the WARP design survived
   a per-IP throttle, this one rides it out.
 - **No rotation.** Restarting a container cannot change the egress IP, so a
-  per-IP 429 has no escape. `keep-cold.mjs` is still WARP-era code — its
-  rotations target `warp-N` containers that no longer exist — so detection is
-  the only thing it can still offer, and only after you point its
-  `RELAY_HOST` at a reachable relay. See [04](04-operations-keep-cold.md).
+  per-IP 429 has no escape. Nothing can rotate to a fresh address, so
+  `probe.mjs` — the pool's prober — only detects and reports: it reads
+  `RELAY_HOST` and `RELAY_BASE_PORT` from the generated `docker-compose.yml`
+  publish line when they are unset, never touches a container, and cannot
+  clear a 429. When the router is not host-published (a tunnels-only deploy),
+  it exits 2 — "could not measure" — instead of probing dead ports. See
+  [04](04-operations-keep-cold.md).
 - **Much smaller footprint.** No WireGuard, no microsocks, no `NET_ADMIN`:
   one container, and a pool that fits anywhere a single relay would.

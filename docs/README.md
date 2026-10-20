@@ -11,8 +11,9 @@ Numbered user journey. Read in order.
 3. [03 — Use with pi-freeflow (OMP/Pi client)](03-use-with-pi-freeflow.md) —
    `get-status.sh` → `/freeflow add`, mesh-VPN client requirement,
    health-check curls, allowlist.
-4. [04 — Operations: keep-cold](04-operations-keep-cold.md) — probe logic,
-   tunable env table, quota-guard tuning, never-restart rule, logs.
+4. [04 — Operations: throttle detection](04-operations-keep-cold.md) —
+   `probe.mjs` behavior, tunable env table, quota-guard tuning,
+   never-restart rule, exit codes, logs.
 5. [05 — Troubleshooting / FAQ](05-troubleshooting-faq.md) — URL changed,
    403, 429, mesh URLs skipped, port collisions, stale image, not-ready containers.
 

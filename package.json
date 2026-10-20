@@ -7,7 +7,7 @@
   },
   "name": "warp-relay",
   "scripts": {
-    "probe": "node keep-cold.mjs",
+    "probe": "node probe.mjs",
     "start": "node server.mjs"
   },
   "type": "module",
